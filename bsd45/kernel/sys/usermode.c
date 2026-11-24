@@ -5030,7 +5030,14 @@ thread_exit_current(int code)
 		}
 	}
 	if (t->t_detached) {
-		cur_thread = 0;
+		/*
+		 * Keep cur_thread == t across the free so kthread_user_free()
+		 * takes the deferred path.  proc_sched() below keeps running
+		 * on t's 16 KB stack; clearing cur_thread first (as the old
+		 * code did) defeated the "this CPU is still on that stack"
+		 * check and let a concurrent tcb_reserve()+kstack_alloc()
+		 * bzero a live stack - the detached-thread form of TRAP 12.
+		 */
 		kthread_user_free(t);
 	}
 	proc_sched();
