@@ -414,6 +414,8 @@ kthread_init(void)
 		kthreads[i].t_used = 0;
 		kthreads[i].t_oncpu = -1;
 		kthreads[i].t_reap_cpu = -1;
+		kthreads[i].t_runq = 0;
+		kthreads[i].t_runq_cpu = -1;
 	}
 	printf("kthread: %d thread slots at %x (%d KB stacks)\n", nkthread,
 	    KSTACK_VA, KSTACK_SIZE / 1024);
@@ -465,6 +467,8 @@ kthread_spawn(const char *name, void (*entry)(void *), void *arg)
 	t->t_proc = 0;
 	t->t_oncpu = -1;		/* unowned: any CPU may take it */
 	t->t_reap_cpu = -1;
+	t->t_runq = 0;			/* S428: kernel threads use rq_head */
+	t->t_runq_cpu = -1;
 	t->t_base_ipl = 0;
 	t->t_eff_ipl = 0;
 	t->t_preemptable = 1;
@@ -520,6 +524,8 @@ kthread_user_spawn(struct process *p, int tid)
 	t->t_proc = p;
 	t->t_oncpu = -1;		/* first CPU to claim it runs it */
 	t->t_reap_cpu = -1;
+	t->t_runq = 0;			/* S428: not on a run queue yet */
+	t->t_runq_cpu = -1;
 	t->t_base_ipl = 0;
 	t->t_eff_ipl = 0;
 	t->t_preemptable = 1;
