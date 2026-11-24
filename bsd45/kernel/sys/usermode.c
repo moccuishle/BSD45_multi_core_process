@@ -907,6 +907,14 @@ static void sig_deliver(struct process *, struct sysregs *);
 static struct kthread *fair_pick_next(struct kthread *me);
 static int console_fg_pgrp;
 
+/*
+ * S430: guard for the page allocator.  The free list, the bump pointer and
+ * the counters are global, and user_page_fault() now has a branch that runs
+ * *without* the big kernel lock, so they can no longer rely on it.  This is
+ * the first piece of the BKL split (#10): a subsystem lock that is correct on
+ * its own, so the BKL can be dropped path by path instead of all at once.
+ */
+static struct spinlock	page_lock;
 static unsigned page_free_list;
 static unsigned page_nalloc, page_nfree, page_ninuse;
 
@@ -1191,17 +1199,11 @@ page_alloc(void)
 	unsigned pa;
 
 	/*
-	 * Memory-pressure hook: before bumping into more RAM, try to compress
-	 * a few private anonymous pages.  The compressed pages stay in RAM,
-	 * so this trades CPU for headroom instead of going to swap (there is
-	 * no swap device in this port).
-	 * 内存压力钩子：在继续向物理内存推进之前，先压缩少量进程私有匿名页。
-	 * 压缩后的页仍在 RAM 中，用 CPU 换空间，而不是写 swap（本端口没有
-	 * swap 设备）。
+	 * S430: pop under page_lock.  The reclaim hook stays *outside* it -
+	 * zcomp_reclaim() frees pages through page_free(), and taking the lock
+	 * there would self-deadlock on a non-recursive spinlock.
 	 */
-	if (page_free_list == 0 && page_ninuse > (unsigned)reclaim_watermark() &&
-	    !in_zcomp && !in_fault && cur != 0)
-		(void)zcomp_reclaim(8);
+	spin_lock(&page_lock);
 	if (page_free_list != 0) {
 		unsigned *p = map_page(SCRATCH_PAGE, page_free_list);
 
@@ -1210,6 +1212,34 @@ page_alloc(void)
 		page_nalloc++;
 		page_ninuse++;
 		page_ref_set(pa, 1);
+		spin_unlock(&page_lock);
+		return (pa);
+	}
+	spin_unlock(&page_lock);
+
+	/*
+	 * Memory-pressure hook: before bumping into more RAM, try to compress
+	 * a few private anonymous pages.  The compressed pages stay in RAM,
+	 * so this trades CPU for headroom instead of going to swap (there is
+	 * no swap device in this port).
+	 * 内存压力钩子：在继续向物理内存推进之前，先压缩少量进程私有匿名页。
+	 * 压缩后的页仍在 RAM 中，用 CPU 换空间，而不是写 swap（本端口没有
+	 * swap 设备）。
+	 */
+	if (page_ninuse > (unsigned)reclaim_watermark() &&
+	    !in_zcomp && !in_fault && cur != 0)
+		(void)zcomp_reclaim(8);
+
+	spin_lock(&page_lock);
+	if (page_free_list != 0) {
+		unsigned *p = map_page(SCRATCH_PAGE, page_free_list);
+
+		pa = page_free_list;
+		page_free_list = *p;
+		page_nalloc++;
+		page_ninuse++;
+		page_ref_set(pa, 1);
+		spin_unlock(&page_lock);
 		return (pa);
 	}
 	pa = next_pa;
@@ -1228,6 +1258,7 @@ page_alloc(void)
 	page_nalloc++;
 	page_ninuse++;
 	page_ref_set(pa, 1);
+	spin_unlock(&page_lock);
 	return (pa);
 }
 
@@ -1240,6 +1271,7 @@ page_free(unsigned pa)
 
 	if (pa == 0 || (pa & (PAGE_SIZE - 1)) != 0)
 		return;
+	spin_lock(&page_lock);
 	p = map_page(SCRATCH_PAGE, pa);
 	*p = page_free_list;
 	page_free_list = pa;
@@ -1247,6 +1279,7 @@ page_free(unsigned pa)
 	page_nfree++;
 	if (page_ninuse > 0)
 		page_ninuse--;
+	spin_unlock(&page_lock);
 }
 
 /*
@@ -3442,6 +3475,7 @@ proc_table_init(void)
 
 	user_layout_init();
 	spin_init(&proc_table_lock);
+	spin_init(&page_lock);
 	procs = (struct process *)kern_table_alloc((unsigned)PROC_TABLE_VA,
 	    (unsigned)NPROC * (unsigned)sizeof(struct process));
 	printf("usermode: %d proc slots at %x (%d KB)\n", NPROC,
