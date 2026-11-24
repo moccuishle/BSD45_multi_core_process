@@ -3698,8 +3698,16 @@ proc_sched(void)
 		/*
 		 * S21: kernel threads (softirq, page reclaim, IRP workers)
 		 * get their own execution carrier first.
+		 *
+		 * S429: only the BSP does this *before* user dispatch.  An AP
+		 * reaches this point with the previous thread's CR3 still
+		 * loaded, and a kernel thread that touches a user buffer would
+		 * then run in the wrong address space.  APs poll from the idle
+		 * path below instead, where CR3 is IdlePTD - the same context
+		 * the BSP has always used for them.
 		 */
-		kthread_run();
+		if (cid == 0)
+			kthread_run();
 		/*
 		 * S25: the scheduler walks threads, not processes.  Each
 		 * user thread names its address-space container through
