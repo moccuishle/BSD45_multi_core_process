@@ -5009,6 +5009,19 @@ thread_exit_current(int code)
 		proc_sched();
 		return;
 	}
+	/*
+	 * Leave the user address space BEFORE publishing KT_ZOMBIE.  The main
+	 * thread may free the whole address space as soon as thread_join()
+	 * observes the zombie state; if this CPU then sat in proc_sched()
+	 * with the process CR3 still loaded, the page-directory page would
+	 * already be back in the allocator.  A later trap would fault while
+	 * fetching _Xpage itself (the kernel PDE 0x3f8 is only present while
+	 * the PD is alive), escalating to a double/triple fault - exactly the
+	 * pthpre-exit crash.  Publish the zombie state only after CR3 is on
+	 * the kernel directory.
+	 */
+	hal_address_space_activate((unsigned)IdlePTD);
+	cur_pd = (unsigned)IdlePTD;
 	t->t_exitcode = code;
 	t->t_state = KT_ZOMBIE;
 	/* release inherited priority: the resource (this thread) is done */
