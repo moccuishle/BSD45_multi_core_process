@@ -77,20 +77,31 @@ def main():
                 continue
             except OSError:
                 return False
-            if until and until.encode() in bytes(buf):
+            if until and buf.find(until.encode()) >= 0:
                 return True
         return False
 
     hard = time.time() + args.timeout
     if not pump("bsd45>", min(hard, time.time() + args.boot_wait)):
         print("qdrive: boot timeout (no monitor prompt)", file=sys.stderr)
-    for cmd in args.cmd:
+    for spec in args.cmd:
+        # "command+SECONDS" waits that long after the command instead of the
+        # global --gap (a 1000-process stress test needs minutes, `ps` doesn't)
+        cmd, wait = spec, args.gap
+        if "+" in spec:
+            head, _, tail = spec.rpartition("+")
+            if tail.isdigit():
+                cmd, wait = head, float(tail)
         try:
             sock.sendall(cmd.encode() + b"\r")
         except OSError:
             break
-        time.sleep(args.gap)
-        pump(None, min(hard, time.time() + 5), quiet=0.6)   # drain, then go on
+        # Keep draining for the whole wait.  A long stress test (proctest)
+        # prints through the serial port; if nobody reads, QEMU's TCP socket
+        # buffer fills up and the guest blocks inside printf forever, so the
+        # test looks hung even though the kernel is healthy.  The old
+        # `time.sleep(wait)` did exactly that and produced rc=124 every time.
+        pump(None, min(hard, time.time() + wait))
     pump("user exit", hard)
     time.sleep(1.0)
     pump(None, time.time() + 1.0)
